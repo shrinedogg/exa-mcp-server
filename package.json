@@ -32,6 +32,7 @@
   "scripts": {
     "build": "npm run build:stdio",
     "build:stdio": "esbuild src/stdio-cli.ts --bundle --platform=node --target=node20 --format=cjs --outfile=dist/stdio.cjs --banner:js=\"#!/usr/bin/env node\" && chmod +x dist/stdio.cjs",
+    "build:http": "esbuild src/http-server-cli.ts --bundle --platform=node --target=node20 --format=cjs --outfile=dist/http.cjs --banner:js=\"#!/usr/bin/env node\" && chmod +x dist/http.cjs",
     "build:vercel": "npm install typescript && ./node_modules/.bin/tsc",
     "setup": "npm ci",
     "start": "npm run dev",
@@ -40,7 +41,7 @@
     "test:watch": "vitest",
     "test:coverage": "vitest run --coverage",
     "ci": "npm run typecheck && npm run test",
-    "prepare": "npm run build:stdio",
+    "prepare": "npm run build:stdio || true",
     "watch": "./node_modules/.bin/tsc --watch",
     "dev": "tsx src/stdio-cli.ts",
     "dev:vercel": "vercel dev",
@@ -48,7 +49,7 @@
     "prepublishOnly": "npm run build:stdio"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.12.1",
+    "@modelcontextprotocol/sdk": "1.26.0",
     "agnost": "^0.1.11",
     "axios": "^1.13.6",
     "exa-js": "^2.8.0",
