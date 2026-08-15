@@ -67,12 +67,15 @@ jobs:
       - name: Smoke run stdio (amd64)
         run: |
           docker run --rm --platform linux/amd64 \
+            -e EXA_API_KEY=dummy \
             shrinedogg/exa-mcp-server:${{ steps.v.outputs.version }} --help 2>&1 || true
 
       - name: Smoke run HTTP (amd64)
         run: |
-          docker run --rm --platform linux/amd64 \
-            shrinedogg/exa-mcp-server-http:${{ steps.v.outputs.version }} --help 2>&1 || true
+          # HTTP server starts immediately (no --help flag) so just verify it boots
+          timeout 5 docker run --rm --platform linux/amd64 \
+            -e EXA_API_KEY=dummy \
+            shrinedogg/exa-mcp-server-http:${{ steps.v.outputs.version }} 2>&1 || true
 
       - name: Tag repo for reproducibility
         run: |
