@@ -50,9 +50,7 @@ function parseTools(value: string | undefined): string[] | undefined {
   return tools.length > 0 ? tools : undefined;
 }
 
-export function buildConfigFromEnv(
-  env: NodeJS.ProcessEnv = process.env,
-): McpConfig {
+export function buildConfigFromEnv(env: NodeJS.ProcessEnv = process.env): McpConfig {
   return {
     exaApiKey: env.EXA_API_KEY,
     enabledTools: parseTools(env.ENABLED_TOOLS ?? env.TOOLS),
