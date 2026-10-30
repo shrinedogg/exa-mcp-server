@@ -81,7 +81,7 @@ function createMcpServer(config: McpConfig): McpServer {
   const server = new McpServer({
     name: "exa-search-server",
     title: "Exa",
-    version: "3.2.1",
+    version: "3.4.2",
     websiteUrl: "https://exa.ai",
     icons: [
       {

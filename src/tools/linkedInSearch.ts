@@ -1,35 +1,39 @@
 import { z } from "zod";
-import { Exa } from "exa-js";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { API_CONFIG, integrationHeaders } from "./config.js";
+import { API_CONFIG, createExaClient, integrationHeaders } from "./config.js";
 import { ExaSearchRequest, ExaSearchResponse } from "../types.js";
 import { createRequestLogger } from "../utils/logger.js";
 import { retryWithBackoff, formatToolError } from "../utils/errorHandler.js";
-import { sanitizeSearchResponse } from "../utils/exaResponseSanitizer.js";
+import { sanitizeSearchNotices, sanitizeSearchResponse } from "../utils/exaResponseSanitizer.js";
+import { logSearchWarnings, withSearchNotices } from "./searchNotes.js";
 import { lenientString, lenientOptionalNumber } from "./validation.js";
 import { checkpoint } from "agnost";
 
-export function registerLinkedInSearchTool(server: McpServer, config?: { exaApiKey?: string; userProvidedApiKey?: boolean }): void {
+export function registerLinkedInSearchTool(
+  server: McpServer,
+  config?: { exaApiKey?: string; userProvidedApiKey?: boolean },
+): void {
   server.tool(
     "linkedin_search_exa",
-    "⚠️ DEPRECATED: This tool is deprecated. Please use 'people_search_exa' instead. This tool will be removed in a future version. For now, it searches for people on LinkedIn using Exa AI - finds professional profiles and people.",
+    "[Deprecated: Use web_search_advanced_exa with category 'people' instead] Search LinkedIn profiles.",
     {
       query: lenientString().describe("Search query for finding people on LinkedIn"),
-      numResults: lenientOptionalNumber().describe("Number of LinkedIn profile results to return (default: 5)")
+      numResults: lenientOptionalNumber().describe(
+        "Number of LinkedIn profile results to return (default: 5)",
+      ),
     },
     {
       readOnlyHint: true,
       destructiveHint: false,
-      idempotentHint: true
+      idempotentHint: true,
     },
     async ({ query, numResults }) => {
-      const requestId = `linkedin_search_exa-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`;
-      const logger = createRequestLogger(requestId, 'linkedin_search_exa');
-      
+      const logger = createRequestLogger("linkedin_search_exa");
+
       logger.start(`${query}`);
-      
+
       try {
-        const exa = new Exa(config?.exaApiKey || process.env.EXA_API_KEY || '');
+        const exa = createExaClient(config);
 
         let searchQuery = query;
         searchQuery = `${query} LinkedIn profile`;
@@ -43,30 +47,37 @@ export function registerLinkedInSearchTool(server: McpServer, config?: { exaApiK
             highlights: true,
           },
         };
-        
-        checkpoint('linkedin_search_request_prepared');
-        logger.log("Sending request to Exa API for LinkedIn search");
-        
-        const response = await retryWithBackoff(() => exa.request<ExaSearchResponse>(
-          API_CONFIG.ENDPOINTS.SEARCH,
-          'POST',
-          searchRequest,
-          undefined,
-          integrationHeaders('linkedin-search-mcp', config)
-        ));
 
-        checkpoint('linkedin_search_response_received');
+        checkpoint("linkedin_search_request_prepared");
+        logger.log("Sending request to Exa API for LinkedIn search");
+
+        const response = await retryWithBackoff(() =>
+          exa.request<ExaSearchResponse>(
+            API_CONFIG.ENDPOINTS.SEARCH,
+            "POST",
+            searchRequest,
+            undefined,
+            integrationHeaders("linkedin-search-mcp", config),
+          ),
+        );
+
+        checkpoint("linkedin_search_response_received");
         logger.log("Received response from Exa API");
+        logSearchWarnings(response, logger);
+        const notices = sanitizeSearchNotices(response?.notices);
 
         if (!response || !response.results || response.results.length === 0) {
           logger.log("Warning: Empty or invalid response from Exa API");
-          checkpoint('linkedin_search_complete');
-          return {
-            content: [{
-              type: "text" as const,
-              text: "No LinkedIn content found. Please try a different query. Note: This tool is deprecated - please use 'people_search_exa' instead."
-            }]
+          checkpoint("linkedin_search_complete");
+          const noResults = {
+            content: [
+              {
+                type: "text" as const,
+                text: "No LinkedIn content found. Try a different query. linkedin_search_exa is deprecated. Use web_search_advanced_exa with category 'people' instead.",
+              },
+            ],
           };
+          return withSearchNotices(noResults, notices, { results: [] });
         }
 
         logger.log(`Found ${response.results.length} LinkedIn results`);
@@ -74,38 +85,44 @@ export function registerLinkedInSearchTool(server: McpServer, config?: { exaApiK
         const sanitized = sanitizeSearchResponse(response);
         const results = Array.isArray(sanitized.results) ? sanitized.results : [];
 
-        const formattedResults = results.map((r) => {
-          const highlights = Array.isArray(r.highlights) ? r.highlights.join('\n') : '';
-          const lines = [
-            `Title: ${r.title || 'N/A'}`,
-            `URL: ${r.url}`,
-            `Published: ${r.publishedDate || 'N/A'}`,
-            `Author: ${r.author || 'N/A'}`,
-            `Highlights:\n${highlights}`,
-          ];
-          return lines.join('\n');
-        }).join('\n\n---\n\n');
+        const formattedResults = results
+          .map((r) => {
+            const highlights = Array.isArray(r.highlights) ? r.highlights.join("\n") : "";
+            const lines = [
+              `Title: ${r.title || "N/A"}`,
+              `URL: ${r.url}`,
+              `Published: ${r.publishedDate || "N/A"}`,
+              `Author: ${r.author || "N/A"}`,
+              `Highlights:\n${highlights}`,
+            ];
+            return lines.join("\n");
+          })
+          .join("\n\n---\n\n");
 
-        const searchTime = typeof sanitized.searchTime === 'number' ? sanitized.searchTime : undefined;
-        const deprecationNotice = "\n\n⚠️ DEPRECATION NOTICE: This tool (linkedin_search_exa) is deprecated. Please use 'people_search_exa' instead for future requests.";
+        const searchTime =
+          typeof sanitized.searchTime === "number" ? sanitized.searchTime : undefined;
+        const deprecationNotice =
+          "\n\nlinkedin_search_exa is deprecated. Use web_search_advanced_exa with category 'people' instead.";
 
         const result = {
-          content: [{
-            type: "text" as const,
-            text: formattedResults + deprecationNotice,
-            _meta: {
-              searchTime: searchTime
-            }
-          }]
+          content: [
+            {
+              type: "text" as const,
+              text: formattedResults + deprecationNotice,
+              _meta: {
+                searchTime: searchTime,
+              },
+            },
+          ],
         };
-        
-        checkpoint('linkedin_search_complete');
+
+        checkpoint("linkedin_search_complete");
         logger.complete();
-        return result;
+        return withSearchNotices(result, notices, { results });
       } catch (error) {
         logger.error(error);
-        return formatToolError(error, 'linkedin_search_exa', config?.userProvidedApiKey);
+        return formatToolError(error, "linkedin_search_exa", config?.userProvidedApiKey);
       }
-    }
+    },
   );
 }

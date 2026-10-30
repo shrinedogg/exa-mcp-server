@@ -1,6 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-const { fakeServer, initializeMcpServerMock, mcpServerConstructorMock, stdioTransportConstructorMock, connectMock } = vi.hoisted(() => {
+const {
+  fakeServer,
+  initializeMcpServerMock,
+  mcpServerConstructorMock,
+  stdioTransportConstructorMock,
+  connectMock,
+} = vi.hoisted(() => {
   const fakeServer = { id: "underlying-server" };
   const initializeMcpServerMock = vi.fn();
   const mcpServerConstructorMock = vi.fn();
@@ -63,9 +69,21 @@ describe("Stdio entrypoint", () => {
       exaApiKey: "env-key",
       enabledTools: ["web_search_exa", "web_fetch_exa"],
       debug: false,
+      exaSource: undefined,
+      mcpSessionId: undefined,
       defaultSearchType: undefined,
       userProvidedApiKey: true,
     });
+  });
+
+  it("buildConfigFromEnv expands the agent tool alias", async () => {
+    const { buildConfigFromEnv } = await import("../../src/stdio.js");
+
+    const config = buildConfigFromEnv({
+      ENABLED_TOOLS: "agent_tools",
+    });
+
+    expect(config.enabledTools).toEqual(["agent_run"]);
   });
 
   it("buildConfigFromEnv leaves userProvidedApiKey false when EXA_API_KEY is missing", async () => {
@@ -81,20 +99,46 @@ describe("Stdio entrypoint", () => {
       exaApiKey: undefined,
       enabledTools: ["web_search_exa"],
       debug: true,
+      exaSource: undefined,
+      mcpSessionId: undefined,
       defaultSearchType: "fast",
       userProvidedApiKey: false,
     });
   });
 
-  it("buildConfigFromEnv accepts instant as a default search type", async () => {
+  it("buildConfigFromEnv includes optional integration metadata", async () => {
     const { buildConfigFromEnv } = await import("../../src/stdio.js");
 
     const config = buildConfigFromEnv({
-      DEFAULT_SEARCH_TYPE: "instant",
+      EXA_SOURCE: "local",
+      MCP_SESSION_ID: "session-1",
     });
 
-    expect(config.defaultSearchType).toBe("instant");
+    expect(config.exaSource).toBe("local");
+    expect(config.mcpSessionId).toBe("session-1");
   });
+
+  it.each(["auto", "lite", "fast", "instant"])(
+    "buildConfigFromEnv accepts %s as a default search type",
+    async (type) => {
+      const { buildConfigFromEnv } = await import("../../src/stdio.js");
+
+      const config = buildConfigFromEnv({ DEFAULT_SEARCH_TYPE: type });
+
+      expect(config.defaultSearchType).toBe(type);
+    },
+  );
+
+  it.each(["", "FAST", "neural", "deep"])(
+    "buildConfigFromEnv ignores the default search type %o, which names no search type",
+    async (type) => {
+      const { buildConfigFromEnv } = await import("../../src/stdio.js");
+
+      const config = buildConfigFromEnv({ DEFAULT_SEARCH_TYPE: type });
+
+      expect(config.defaultSearchType).toBeUndefined();
+    },
+  );
 
   it("main() wires the McpServer through stdio transport with env-derived config", async () => {
     const { main } = await import("../../src/stdio.js");

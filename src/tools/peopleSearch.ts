@@ -1,15 +1,18 @@
 import { z } from "zod";
-import { Exa } from "exa-js";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { API_CONFIG, integrationHeaders } from "./config.js";
+import { API_CONFIG, createExaClient, integrationHeaders } from "./config.js";
 import { ExaSearchRequest, ExaSearchResponse } from "../types.js";
 import { createRequestLogger } from "../utils/logger.js";
 import { retryWithBackoff, formatToolError } from "../utils/errorHandler.js";
-import { sanitizeSearchResponse } from "../utils/exaResponseSanitizer.js";
+import { sanitizeSearchNotices, sanitizeSearchResponse } from "../utils/exaResponseSanitizer.js";
+import { logSearchWarnings, withSearchNotices } from "./searchNotes.js";
 import { lenientString, lenientOptionalNumber } from "./validation.js";
 import { checkpoint } from "agnost";
 
-export function registerPeopleSearchTool(server: McpServer, config?: { exaApiKey?: string; userProvidedApiKey?: boolean }): void {
+export function registerPeopleSearchTool(
+  server: McpServer,
+  config?: { exaApiKey?: string; userProvidedApiKey?: boolean },
+): void {
   server.tool(
     "people_search_exa",
     `[Deprecated: Use web_search_advanced_exa instead] Find people and their professional profiles.
@@ -18,21 +21,22 @@ Best for: Finding professionals, executives, or anyone with a public profile.
 Returns: Profile information and links.`,
     {
       query: lenientString().describe("Search query for finding people"),
-      numResults: lenientOptionalNumber().describe("Number of profile results to return (default: 5)")
+      numResults: lenientOptionalNumber().describe(
+        "Number of profile results to return (default: 5)",
+      ),
     },
     {
       readOnlyHint: true,
       destructiveHint: false,
-      idempotentHint: true
+      idempotentHint: true,
     },
     async ({ query, numResults }) => {
-      const requestId = `people_search_exa-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`;
-      const logger = createRequestLogger(requestId, 'people_search_exa');
-      
+      const logger = createRequestLogger("people_search_exa");
+
       logger.start(`${query}`);
-      
+
       try {
-        const exa = new Exa(config?.exaApiKey || process.env.EXA_API_KEY || '');
+        const exa = createExaClient(config);
 
         let searchQuery = query;
         searchQuery = `${query} profile`;
@@ -46,30 +50,37 @@ Returns: Profile information and links.`,
             highlights: true,
           },
         };
-        
-        checkpoint('people_search_request_prepared');
-        logger.log("Sending request to Exa API for people search");
-        
-        const response = await retryWithBackoff(() => exa.request<ExaSearchResponse>(
-          API_CONFIG.ENDPOINTS.SEARCH,
-          'POST',
-          searchRequest,
-          undefined,
-          integrationHeaders('people-search-mcp', config)
-        ));
 
-        checkpoint('people_search_response_received');
+        checkpoint("people_search_request_prepared");
+        logger.log("Sending request to Exa API for people search");
+
+        const response = await retryWithBackoff(() =>
+          exa.request<ExaSearchResponse>(
+            API_CONFIG.ENDPOINTS.SEARCH,
+            "POST",
+            searchRequest,
+            undefined,
+            integrationHeaders("people-search-mcp", config),
+          ),
+        );
+
+        checkpoint("people_search_response_received");
         logger.log("Received response from Exa API");
+        logSearchWarnings(response, logger);
+        const notices = sanitizeSearchNotices(response?.notices);
 
         if (!response || !response.results || response.results.length === 0) {
           logger.log("Warning: Empty or invalid response from Exa API");
-          checkpoint('people_search_complete');
-          return {
-            content: [{
-              type: "text" as const,
-              text: "No content found. Please try a different query."
-            }]
+          checkpoint("people_search_complete");
+          const noResults = {
+            content: [
+              {
+                type: "text" as const,
+                text: "No content found. Please try a different query.",
+              },
+            ],
           };
+          return withSearchNotices(noResults, notices, { results: [] });
         }
 
         logger.log(`Found ${response.results.length} results`);
@@ -77,37 +88,42 @@ Returns: Profile information and links.`,
         const sanitized = sanitizeSearchResponse(response);
         const results = Array.isArray(sanitized.results) ? sanitized.results : [];
 
-        const formattedResults = results.map((r) => {
-          const highlights = Array.isArray(r.highlights) ? r.highlights.join('\n') : '';
-          const lines = [
-            `Title: ${r.title || 'N/A'}`,
-            `URL: ${r.url}`,
-            `Published: ${r.publishedDate || 'N/A'}`,
-            `Author: ${r.author || 'N/A'}`,
-            `Highlights:\n${highlights}`,
-          ];
-          return lines.join('\n');
-        }).join('\n\n---\n\n');
+        const formattedResults = results
+          .map((r) => {
+            const highlights = Array.isArray(r.highlights) ? r.highlights.join("\n") : "";
+            const lines = [
+              `Title: ${r.title || "N/A"}`,
+              `URL: ${r.url}`,
+              `Published: ${r.publishedDate || "N/A"}`,
+              `Author: ${r.author || "N/A"}`,
+              `Highlights:\n${highlights}`,
+            ];
+            return lines.join("\n");
+          })
+          .join("\n\n---\n\n");
 
-        const searchTime = typeof sanitized.searchTime === 'number' ? sanitized.searchTime : undefined;
+        const searchTime =
+          typeof sanitized.searchTime === "number" ? sanitized.searchTime : undefined;
 
         const result = {
-          content: [{
-            type: "text" as const,
-            text: formattedResults,
-            _meta: {
-              searchTime: searchTime
-            }
-          }]
+          content: [
+            {
+              type: "text" as const,
+              text: formattedResults,
+              _meta: {
+                searchTime: searchTime,
+              },
+            },
+          ],
         };
-        
-        checkpoint('people_search_complete');
+
+        checkpoint("people_search_complete");
         logger.complete();
-        return result;
+        return withSearchNotices(result, notices, { results });
       } catch (error) {
         logger.error(error);
-        return formatToolError(error, 'people_search_exa', config?.userProvidedApiKey);
+        return formatToolError(error, "people_search_exa", config?.userProvidedApiKey);
       }
-    }
+    },
   );
 }

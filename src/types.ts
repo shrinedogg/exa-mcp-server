@@ -1,8 +1,16 @@
 // Exa API Types
 export interface ExaSearchRequest {
   query: string;
-  type: 'auto' | 'fast' | 'instant' | 'deep' | 'deep-reasoning';
-  category?: 'company' | 'research paper' | 'news' | 'pdf' | 'github' | 'personal site' | 'people' | 'financial report';
+  type: "auto" | "lite" | "fast" | "instant" | "deep" | "deep-reasoning";
+  category?:
+    | "company"
+    | "publication"
+    | "news"
+    | "pdf"
+    | "github"
+    | "personal site"
+    | "people"
+    | "financial report";
   includeDomains?: string[];
   excludeDomains?: string[];
   startPublishedDate?: string;
@@ -10,20 +18,27 @@ export interface ExaSearchRequest {
   numResults?: number;
   additionalQueries?: string[];
   outputSchema?: Record<string, unknown>;
+  objective?: string;
   contents: {
-    text?: {
-      maxCharacters?: number;
-    } | boolean;
-    highlights?: {
-      maxCharacters?: number;
-      numSentences?: number;
-      highlightsPerUrl?: number;
-      query?: string;
-    } | boolean;
-    summary?: {
-      query?: string;
-    } | boolean;
-    livecrawl?: 'fallback' | 'preferred';
+    text?:
+      | {
+          maxCharacters?: number;
+        }
+      | boolean;
+    highlights?:
+      | {
+          maxCharacters?: number;
+          numSentences?: number;
+          highlightsPerUrl?: number;
+          query?: string;
+        }
+      | boolean;
+    summary?:
+      | {
+          query?: string;
+        }
+      | boolean;
+    livecrawl?: "fallback" | "preferred";
     maxAgeHours?: number;
     subpages?: number;
     subpageTarget?: string[];
@@ -32,9 +47,17 @@ export interface ExaSearchRequest {
 
 export interface ExaAdvancedSearchRequest {
   query: string;
-  type: 'auto' | 'fast' | 'instant';
+  type: "auto" | "lite" | "fast" | "instant";
   numResults?: number;
-  category?: 'company' | 'research paper' | 'news' | 'pdf' | 'github' | 'personal site' | 'people' | 'financial report';
+  category?:
+    | "company"
+    | "publication"
+    | "news"
+    | "pdf"
+    | "github"
+    | "personal site"
+    | "people"
+    | "financial report";
   includeDomains?: string[];
   excludeDomains?: string[];
   startPublishedDate?: string;
@@ -47,22 +70,28 @@ export interface ExaAdvancedSearchRequest {
   moderation?: boolean;
   additionalQueries?: string[];
   contents: {
-    text?: {
-      maxCharacters?: number;
-    } | boolean;
-    context?: {
-      maxCharacters?: number;
-    } | boolean;
-    summary?: {
-      query?: string;
-    } | boolean;
+    text?:
+      | {
+          maxCharacters?: number;
+        }
+      | boolean;
+    context?:
+      | {
+          maxCharacters?: number;
+        }
+      | boolean;
+    summary?:
+      | {
+          query?: string;
+        }
+      | boolean;
     highlights?: {
       maxCharacters?: number;
       numSentences?: number;
       highlightsPerUrl?: number;
       query?: string;
     };
-    livecrawl?: 'never' | 'fallback' | 'always' | 'preferred';
+    livecrawl?: "never" | "fallback" | "always" | "preferred";
     maxAgeHours?: number;
     livecrawlTimeout?: number;
     subpages?: number;
@@ -107,6 +136,33 @@ export interface ExaCostDollars {
   contents?: Record<string, number>;
 }
 
+/**
+ * The fields every `warnings[]` and `notices[]` item of a search response
+ * carries: `code` is an UPPER_SNAKE token from an open set (clients must
+ * tolerate codes they do not know), `path` a JSON Pointer to the request field
+ * the item is about (`/query`), and `message` is complete on its own.
+ */
+export interface ExaSearchNote {
+  code: string;
+  path: string;
+  message: string;
+}
+
+/**
+ * A note about the request itself, such as a field the API ignores. It is for
+ * whoever maintains the code that builds the request, never for a model.
+ */
+export type ExaSearchWarning = ExaSearchNote;
+
+/**
+ * A note about how the results were produced, such as a query restriction
+ * relaxed to return any results, written to be shown to a model. `details` is
+ * an open object of extra context that never carries what `message` lacks.
+ */
+export interface ExaSearchNotice extends ExaSearchNote {
+  details?: Record<string, unknown>;
+}
+
 export interface ExaSearchResponse {
   requestId: string;
   autopromptString?: string;
@@ -126,6 +182,8 @@ export interface ExaSearchResponse {
   };
   statuses?: ExaSearchStatus[];
   results: ExaSearchResult[];
+  warnings?: ExaSearchWarning[];
+  notices?: ExaSearchNotice[];
   searchTime?: number;
   costDollars?: ExaCostDollars;
 }
@@ -133,7 +191,7 @@ export interface ExaSearchResponse {
 // Deep Search API Types
 export interface ExaDeepSearchRequest {
   query: string;
-  type: 'deep' | 'deep-reasoning';
+  type: "deep" | "deep-reasoning";
   numResults?: number;
   additionalQueries?: string[];
   outputSchema?: Record<string, unknown>;
@@ -166,6 +224,8 @@ export interface ExaDeepSearchResponse {
   };
   statuses?: ExaSearchStatus[];
   results: ExaSearchResult[];
+  warnings?: ExaSearchWarning[];
+  notices?: ExaSearchNotice[];
   searchTime?: number;
   costDollars?: ExaCostDollars;
 }
@@ -180,7 +240,7 @@ export interface ExaContentsResponse {
 
 // Deep Research API Types (v1)
 export interface DeepResearchRequest {
-  model: 'exa-research-fast' | 'exa-research' | 'exa-research-pro';
+  model: "exa-research-fast" | "exa-research" | "exa-research-pro";
   instructions: string;
   outputSchema?: Record<string, unknown>;
 }
@@ -201,7 +261,7 @@ export interface DeepResearchCheckResponse {
   instructions: string;
   outputSchema?: Record<string, unknown>;
   finishedAt?: number;
-  status: 'pending' | 'running' | 'completed' | 'canceled' | 'failed';
+  status: "pending" | "running" | "completed" | "canceled" | "failed";
   output?: {
     content: string;
     parsed?: Record<string, unknown>;
@@ -248,3 +308,33 @@ export interface ExaCodeResponse {
   outputTokens?: number;
   traces?: any;
 }
+
+export type AgentEffort = "minimal" | "low" | "medium" | "high" | "xhigh" | "ultra" | "auto";
+/** Exa Connect provider ID; the Agent API decides which providers the team may use. */
+export type AgentDataSourceProvider = string;
+
+export type AgentRunInput = {
+  query: string;
+  systemPrompt?: string;
+  input?: {
+    data?: Array<Record<string, unknown>>;
+    exclusion?: Array<Record<string, unknown>>;
+  };
+  outputSchema?: Record<string, unknown> | null;
+  effort?: AgentEffort;
+  /** Per-run limits for the metered `auto` and `ultra` efforts; the Agent API validates the ranges. */
+  budget?: {
+    maxCostDollars?: number;
+    maxDurationSeconds?: number;
+  };
+  previousRunId?: string;
+  dataSources?: Array<{
+    provider: AgentDataSourceProvider;
+  }>;
+};
+
+export type ToolContent = {
+  content: Array<{ type: "text"; text: string }>;
+  structuredContent?: Record<string, unknown>;
+  isError?: true;
+};

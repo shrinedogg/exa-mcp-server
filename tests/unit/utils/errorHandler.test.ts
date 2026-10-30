@@ -1,16 +1,22 @@
 import { ExaError } from "exa-js";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { formatToolError, retryWithBackoff } from "../../../src/utils/errorHandler.js";
+import {
+  formatToolError,
+  RATE_LIMITED_META_KEY,
+  retryWithBackoff,
+  withTimeout,
+} from "../../../src/utils/errorHandler.js";
 
 describe("errorHandler", () => {
   afterEach(() => {
     vi.useRealTimers();
   });
 
-  it("formats free MCP rate limits with API key setup guidance", () => {
+  it("formats free MCP rate limits as a non-error notice with API key setup guidance", () => {
     const result = formatToolError(new ExaError("Too many requests", 429), "web_search_exa", false);
 
-    expect(result.isError).toBe(true);
+    expect("isError" in result).toBe(false);
+    expect("_meta" in result && result._meta[RATE_LIMITED_META_KEY]).toBe(true);
     expect(result.content[0].text).toContain("free MCP rate limit");
     expect(result.content[0].text).toContain("https://dashboard.exa.ai/api-keys");
   });
@@ -59,5 +65,32 @@ describe("errorHandler", () => {
 
     await expect(retryWithBackoff(fn)).rejects.toThrow("bad request");
     expect(fn).toHaveBeenCalledTimes(1);
+  });
+
+  it("resolves when the wrapped function completes before the timeout", async () => {
+    vi.useFakeTimers();
+
+    await expect(withTimeout(() => Promise.resolve("ok"), 1_000, "test operation")).resolves.toBe(
+      "ok",
+    );
+  });
+
+  it("rejects with the expected message when the timeout is exceeded", async () => {
+    vi.useFakeTimers();
+    const result = withTimeout(() => new Promise<string>(() => {}), 60_000, "web_search_exa");
+    const assertion = expect(result).rejects.toThrow("web_search_exa timed out after 60s");
+
+    await vi.advanceTimersByTimeAsync(60_000);
+
+    await assertion;
+  });
+
+  it("propagates errors from the wrapped function", async () => {
+    vi.useFakeTimers();
+    const error = new Error("request failed");
+
+    await expect(withTimeout(() => Promise.reject(error), 1_000, "test operation")).rejects.toBe(
+      error,
+    );
   });
 });

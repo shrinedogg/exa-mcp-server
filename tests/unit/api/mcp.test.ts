@@ -24,8 +24,16 @@ const {
   const rateLimitInstances: Array<{ limit: ReturnType<typeof vi.fn> }> = [];
   const redisValues = new Map<string, string>();
   class RatelimitMock {
-    static slidingWindow = vi.fn((limit: number, window: string) => ({ limit, window, type: "sliding" }));
-    static fixedWindow = vi.fn((limit: number, window: string) => ({ limit, window, type: "fixed" }));
+    static slidingWindow = vi.fn((limit: number, window: string) => ({
+      limit,
+      window,
+      type: "sliding",
+    }));
+    static fixedWindow = vi.fn((limit: number, window: string) => ({
+      limit,
+      window,
+      type: "fixed",
+    }));
 
     constructor() {
       return rateLimitInstances.shift() ?? { limit: vi.fn().mockResolvedValue({ success: true }) };
@@ -38,7 +46,15 @@ const {
       redisValues.set(key, value);
       return "OK";
     });
-    get = vi.fn(async (key: string) => redisValues.get(key) ?? null);
+    get = vi.fn(async (key: string) => {
+      const value = redisValues.get(key);
+      if (value === undefined) return null;
+      try {
+        return JSON.parse(value) as unknown;
+      } catch {
+        return value;
+      }
+    });
   }
   const verifyOAuthTokenMock = vi.fn();
 
@@ -108,11 +124,15 @@ describe("api/mcp handler", () => {
     capturedRequests.length = 0;
     rateLimitInstances.length = 0;
     redisValues.clear();
-    isJwtTokenMock.mockImplementation((token: string) => token === "jwt-token" || token === "invalid-jwt");
+    isJwtTokenMock.mockImplementation(
+      (token: string) =>
+        token === "jwt-token" || token === "keyless-jwt" || token === "invalid-jwt",
+    );
     verifyOAuthTokenMock.mockResolvedValue(null);
     vi.spyOn(console, "log").mockImplementation(() => undefined);
     vi.spyOn(console, "error").mockImplementation(() => undefined);
 
+    delete process.env.AGENT_CALL_WINDOW_MS;
     delete process.env.DEBUG;
     delete process.env.DEFAULT_SEARCH_TYPE;
     delete process.env.ENABLED_TOOLS;
@@ -346,7 +366,7 @@ describe("api/mcp handler", () => {
     expect(new URL(forwardedRequest?.url ?? "").searchParams.has("exaApiKey")).toBe(false);
   });
 
-  it("uses an OAuth JWT api key claim from Authorization bearer tokens", async () => {
+  it("uses an OAuth JWT from Authorization bearer tokens", async () => {
     verifyOAuthTokenMock.mockResolvedValue({
       sub: "user-1",
       "exa:team_id": "team-1",
@@ -364,7 +384,30 @@ describe("api/mcp handler", () => {
 
     expect(verifyOAuthTokenMock).toHaveBeenCalledWith("jwt-token");
     expect(config).toMatchObject({
-      exaApiKey: "oauth-api-key",
+      oauthAccessToken: "jwt-token",
+      userProvidedApiKey: true,
+      authMethod: "oauth",
+    });
+  });
+
+  it("accepts a keyless OAuth JWT from Authorization bearer tokens", async () => {
+    verifyOAuthTokenMock.mockResolvedValue({
+      sub: "user-1",
+      "exa:team_id": "team-1",
+      scope: "mcp:tools",
+    });
+
+    const { config } = await callHandleRequest(
+      new Request("https://mcp.exa.ai/mcp", {
+        headers: {
+          authorization: "Bearer keyless-jwt",
+        },
+      }),
+    );
+
+    expect(verifyOAuthTokenMock).toHaveBeenCalledWith("keyless-jwt");
+    expect(config).toMatchObject({
+      oauthAccessToken: "keyless-jwt",
       userProvidedApiKey: true,
       authMethod: "oauth",
     });
@@ -430,23 +473,189 @@ describe("api/mcp handler", () => {
     expect(new URL(forwardedRequest?.url ?? "").searchParams.has("exaApiKey")).toBe(false);
   });
 
-  it("accepts instant as a defaultSearchType query parameter", async () => {
+  it("expands the agent tool alias from query parameters", async () => {
     const { config } = await callHandleRequest(
-      new Request("https://mcp.exa.ai/mcp?defaultSearchType=instant"),
+      new Request("https://mcp.exa.ai/mcp?tools=agent_tools", {
+        headers: {
+          authorization: "Bearer user-key",
+        },
+      }),
     );
 
     expect(config).toMatchObject({
-      defaultSearchType: "instant",
+      enabledTools: ["agent_run"],
     });
   });
 
-  it("falls back to DEFAULT_SEARCH_TYPE from the environment", async () => {
-    process.env.DEFAULT_SEARCH_TYPE = "instant";
+  it("enables agent tools with key", async () => {
+    const { config, forwardedRequest } = await callHandleRequest(
+      new Request("https://mcp.exa.ai/mcp?tools=agent_tools", {
+        headers: {
+          "x-api-key": "user-key",
+        },
+      }),
+    );
+
+    expect(config).toMatchObject({
+      exaApiKey: "user-key",
+      userProvidedApiKey: true,
+      authMethod: "api_key",
+      enabledTools: ["agent_run"],
+    });
+    expect(forwardedRequest?.headers.get("x-api-key")).toBeNull();
+  });
+
+  it("expands the agent tool alias from ENABLED_TOOLS", async () => {
+    process.env.ENABLED_TOOLS = "agent_tools";
+
+    const { config } = await callHandleRequest(
+      new Request("https://mcp.exa.ai/mcp", {
+        headers: {
+          authorization: "Bearer user-key",
+        },
+      }),
+    );
+
+    expect(config).toMatchObject({
+      enabledTools: ["agent_run"],
+    });
+  });
+
+  it("requires auth before initializing MCP when query-selected tools require user-provided auth", async () => {
+    const { response, config } = await callHandleRequest(
+      new Request("https://mcp.exa.ai/mcp?tools=agent_tools", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          jsonrpc: "2.0",
+          id: 1,
+          method: "initialize",
+          params: {},
+        }),
+      }),
+    );
+
+    expect(response.status).toBe(401);
+    expect(response.headers.get("WWW-Authenticate")).toContain(
+      'resource_metadata="https://mcp.exa.ai/.well-known/oauth-protected-resource/mcp"',
+    );
+    await expect(response.json()).resolves.toMatchObject({
+      jsonrpc: "2.0",
+      error: {
+        code: -32000,
+        message: "Authentication required. Use OAuth or provide an API key.",
+      },
+      id: null,
+    });
+    expectMcpCorsHeaders(response);
+    expect(config).toBeUndefined();
+    expect(createMcpHandlerMock).not.toHaveBeenCalled();
+    expect(initializeMcpServerMock).not.toHaveBeenCalled();
+  });
+
+  it("requires auth before initializing MCP when an explicit selected tool requires user-provided auth", async () => {
+    const { response, config } = await callHandleRequest(
+      new Request("https://mcp.exa.ai/mcp?tools=deep_search_exa"),
+    );
+
+    expect(response.status).toBe(401);
+    expect(response.headers.get("WWW-Authenticate")).toContain(
+      'resource_metadata="https://mcp.exa.ai/.well-known/oauth-protected-resource/mcp"',
+    );
+    expectMcpCorsHeaders(response);
+    expect(config).toBeUndefined();
+    expect(createMcpHandlerMock).not.toHaveBeenCalled();
+    expect(initializeMcpServerMock).not.toHaveBeenCalled();
+  });
+
+  it("allows unauthenticated requests when only public tools are selected", async () => {
+    const { response, config } = await callHandleRequest(
+      new Request("https://mcp.exa.ai/mcp?tools=web_search_exa,web_fetch_exa"),
+    );
+
+    expect(response.status).toBe(200);
+    expect(config).toMatchObject({
+      enabledTools: ["web_search_exa", "web_fetch_exa"],
+      userProvidedApiKey: false,
+      authMethod: "free_tier",
+    });
+    expect(initializeMcpServerMock).toHaveBeenCalled();
+  });
+
+  it.each(["auto", "lite", "fast", "instant"])(
+    "accepts %s as a defaultSearchType query parameter",
+    async (type) => {
+      const { config } = await callHandleRequest(
+        new Request(`https://mcp.exa.ai/mcp?defaultSearchType=${type}`),
+      );
+
+      expect(config).toMatchObject({ defaultSearchType: type });
+    },
+  );
+
+  it.each(["", "FAST", "neural", "deep"])(
+    "ignores the defaultSearchType query parameter %o, which names no search type",
+    async (type) => {
+      const { config } = await callHandleRequest(
+        new Request(`https://mcp.exa.ai/mcp?defaultSearchType=${type}`),
+      );
+
+      expect(config).toBeDefined();
+      expect(config!.defaultSearchType).toBeUndefined();
+    },
+  );
+
+  it.each(["auto", "lite", "fast", "instant"])(
+    "falls back to DEFAULT_SEARCH_TYPE=%s from the environment",
+    async (type) => {
+      process.env.DEFAULT_SEARCH_TYPE = type;
+
+      const { config } = await callHandleRequest(new Request("https://mcp.exa.ai/mcp"));
+
+      expect(config).toMatchObject({ defaultSearchType: type });
+    },
+  );
+
+  it("prefers ?defaultSearchType over DEFAULT_SEARCH_TYPE", async () => {
+    process.env.DEFAULT_SEARCH_TYPE = "fast";
+
+    const { config } = await callHandleRequest(
+      new Request("https://mcp.exa.ai/mcp?defaultSearchType=lite"),
+    );
+
+    expect(config).toMatchObject({ defaultSearchType: "lite" });
+  });
+
+  it("falls back to DEFAULT_SEARCH_TYPE when ?defaultSearchType is invalid", async () => {
+    process.env.DEFAULT_SEARCH_TYPE = "lite";
+
+    const { config } = await callHandleRequest(
+      new Request("https://mcp.exa.ai/mcp?defaultSearchType=deep"),
+    );
+
+    expect(config).toMatchObject({ defaultSearchType: "lite" });
+  });
+
+  it("ignores a DEFAULT_SEARCH_TYPE that names no search type", async () => {
+    process.env.DEFAULT_SEARCH_TYPE = "deep";
 
     const { config } = await callHandleRequest(new Request("https://mcp.exa.ai/mcp"));
 
+    expect(config).toBeDefined();
+    expect(config!.defaultSearchType).toBeUndefined();
+  });
+
+  it("uses agentCallWindowMs from the query parameter before the environment", async () => {
+    process.env.AGENT_CALL_WINDOW_MS = "60000";
+
+    const { config } = await callHandleRequest(
+      new Request("https://mcp.exa.ai/mcp?agentCallWindowMs=45000"),
+    );
+
     expect(config).toMatchObject({
-      defaultSearchType: "instant",
+      agentCallWindowMs: 45000,
     });
   });
 
@@ -458,6 +667,68 @@ describe("api/mcp handler", () => {
     expect(response.status).toBe(401);
     expect(createMcpHandlerMock).not.toHaveBeenCalled();
     expect(initializeMcpServerMock).not.toHaveBeenCalled();
+  });
+
+  it("returns 401 with WWW-Authenticate when ?login is set and no credentials are present (#378)", async () => {
+    const { response, config } = await callHandleRequest(
+      new Request("https://mcp.exa.ai/mcp?login&tools=web_search_exa"),
+    );
+
+    expect(response.status).toBe(401);
+    expect(response.headers.get("WWW-Authenticate")).toContain(
+      'resource_metadata="https://mcp.exa.ai/.well-known/oauth-protected-resource/mcp"',
+    );
+    await expect(response.json()).resolves.toMatchObject({
+      jsonrpc: "2.0",
+      error: {
+        code: -32000,
+        message: "Authentication required. Use OAuth or provide an API key.",
+      },
+      id: null,
+    });
+    expectMcpCorsHeaders(response);
+    expect(config).toBeUndefined();
+    expect(createMcpHandlerMock).not.toHaveBeenCalled();
+    expect(initializeMcpServerMock).not.toHaveBeenCalled();
+  });
+
+  it("accepts ?login=true as an explicit OAuth challenge opt-in", async () => {
+    const { response } = await callHandleRequest(new Request("https://mcp.exa.ai/mcp?login=true"));
+
+    expect(response.status).toBe(401);
+    expect(response.headers.get("WWW-Authenticate")).toContain("resource_metadata=");
+    expect(createMcpHandlerMock).not.toHaveBeenCalled();
+  });
+
+  it("does not force OAuth when login=false so free-tier remains available", async () => {
+    const { response, config } = await callHandleRequest(
+      new Request("https://mcp.exa.ai/mcp?login=false&tools=web_search_exa"),
+    );
+
+    expect(response.status).toBe(200);
+    expect(config).toMatchObject({
+      authMethod: "free_tier",
+      userProvidedApiKey: false,
+    });
+    expect(initializeMcpServerMock).toHaveBeenCalled();
+  });
+
+  it("allows authenticated requests through when ?login is set", async () => {
+    const { response, config } = await callHandleRequest(
+      new Request("https://mcp.exa.ai/mcp?login=true", {
+        headers: {
+          "x-api-key": "user-key",
+        },
+      }),
+    );
+
+    expect(response.status).toBe(200);
+    expect(config).toMatchObject({
+      exaApiKey: "user-key",
+      userProvidedApiKey: true,
+      authMethod: "api_key",
+    });
+    expect(initializeMcpServerMock).toHaveBeenCalled();
   });
 
   it("uses the internal bypass API key without treating it as user-provided", async () => {
@@ -513,6 +784,37 @@ describe("api/mcp handler", () => {
     expectMcpCorsHeaders(response);
   });
 
+  it("rejects unparsable JSON bodies before they reach the MCP handler", async () => {
+    const { response } = await callHandleRequest(
+      new Request("https://mcp.exa.ai/mcp", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: "{jsonrpc:2.0,id:1,method:initialize}",
+      }),
+    );
+
+    expect(response.status).toBe(400);
+    await expect(response.json()).resolves.toMatchObject({
+      jsonrpc: "2.0",
+      error: { code: -32700, message: "Parse error" },
+    });
+    expectMcpCorsHeaders(response);
+    expect(createMcpHandlerMock).not.toHaveBeenCalled();
+  });
+
+  it("passes non-JSON content types through without parsing the body", async () => {
+    const { response } = await callHandleRequest(
+      new Request("https://mcp.exa.ai/mcp", {
+        method: "POST",
+        headers: { "Content-Type": "text/plain" },
+        body: "not json",
+      }),
+    );
+
+    expect(response.status).toBe(200);
+    expect(createMcpHandlerMock).toHaveBeenCalled();
+  });
+
   it("returns CORS headers for MCP preflight requests", async () => {
     const { handleOptions } = await import("../../../api/mcp.js");
 
@@ -561,6 +863,106 @@ describe("api/mcp handler", () => {
     expect(createMcpHandlerMock).not.toHaveBeenCalled();
   });
 
+  it("rate limits batched tools/call requests when over the limit", async () => {
+    process.env.KV_REST_API_URL = "https://redis.example";
+    process.env.KV_REST_API_TOKEN = "redis-token";
+    const reset = Date.now() + 10_000;
+    rateLimitInstances.push(
+      { limit: vi.fn().mockResolvedValue({ success: false, reset }) },
+      { limit: vi.fn().mockResolvedValue({ success: true, reset }) },
+    );
+
+    const { response } = await callHandleRequest(
+      new Request("https://mcp.exa.ai/mcp", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "x-vercel-forwarded-for": "203.0.113.10",
+        },
+        body: JSON.stringify([
+          { jsonrpc: "2.0", id: 1, method: "tools/call" },
+          { jsonrpc: "2.0", id: 2, method: "tools/call" },
+        ]),
+      }),
+    );
+
+    expect(response.status).toBe(429);
+    expectMcpCorsHeaders(response);
+    expect(createMcpHandlerMock).not.toHaveBeenCalled();
+  });
+
+  it("charges one rate limit token per tools/call member in a batch", async () => {
+    process.env.KV_REST_API_URL = "https://redis.example";
+    process.env.KV_REST_API_TOKEN = "redis-token";
+    const reset = Date.now() + 10_000;
+    const qpsLimit = vi.fn().mockResolvedValue({ success: true, reset });
+    const dailyLimit = vi.fn().mockResolvedValue({ success: true, reset });
+    rateLimitInstances.push({ limit: qpsLimit }, { limit: dailyLimit });
+
+    const { response } = await callHandleRequest(
+      new Request("https://mcp.exa.ai/mcp", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "x-vercel-forwarded-for": "203.0.113.10",
+        },
+        body: JSON.stringify([
+          { jsonrpc: "2.0", id: 1, method: "tools/call" },
+          { jsonrpc: "2.0", id: 2, method: "tools/list" },
+          { jsonrpc: "2.0", id: 3, method: "tools/call" },
+        ]),
+      }),
+    );
+
+    expect(response.status).toBe(200);
+    expect(qpsLimit).toHaveBeenCalledWith("203.0.113.10", { rate: 2 });
+    expect(dailyLimit).toHaveBeenCalledWith("203.0.113.10", { rate: 2 });
+    expect(createMcpHandlerMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not rate limit batches without tools/call members", async () => {
+    process.env.KV_REST_API_URL = "https://redis.example";
+    process.env.KV_REST_API_TOKEN = "redis-token";
+    const reset = Date.now() + 10_000;
+    const qpsLimit = vi.fn().mockResolvedValue({ success: false, reset });
+    const dailyLimit = vi.fn().mockResolvedValue({ success: false, reset });
+    rateLimitInstances.push({ limit: qpsLimit }, { limit: dailyLimit });
+
+    const { response } = await callHandleRequest(
+      new Request("https://mcp.exa.ai/mcp", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "x-vercel-forwarded-for": "203.0.113.10",
+        },
+        body: JSON.stringify([
+          { jsonrpc: "2.0", id: 1, method: "tools/list" },
+          { jsonrpc: "2.0", id: 2, method: "ping" },
+        ]),
+      }),
+    );
+
+    expect(response.status).toBe(200);
+    expect(qpsLimit).not.toHaveBeenCalled();
+    expect(dailyLimit).not.toHaveBeenCalled();
+    expect(createMcpHandlerMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("requires auth before initializing MCP when deep researcher tools are selected", async () => {
+    const { response, config } = await callHandleRequest(
+      new Request("https://mcp.exa.ai/mcp?tools=deep_researcher_start"),
+    );
+
+    expect(response.status).toBe(401);
+    expect(response.headers.get("WWW-Authenticate")).toContain(
+      'resource_metadata="https://mcp.exa.ai/.well-known/oauth-protected-resource/mcp"',
+    );
+    expectMcpCorsHeaders(response);
+    expect(config).toBeUndefined();
+    expect(createMcpHandlerMock).not.toHaveBeenCalled();
+    expect(initializeMcpServerMock).not.toHaveBeenCalled();
+  });
+
   it("includes CORS headers when the MCP handler throws", async () => {
     createMcpHandlerMock.mockImplementationOnce(() => async () => {
       throw new Error("transport failed");
@@ -576,7 +978,9 @@ describe("api/mcp handler", () => {
   it("serves OAuth protected resource metadata for the MCP resource", async () => {
     const { GET } = await import("../../../api/well-known-oauth-protected-resource.js");
 
-    const response = GET();
+    const response = GET(
+      new Request("https://mcp.exa.ai/.well-known/oauth-protected-resource/mcp"),
+    );
 
     expect(response.status).toBe(200);
     await expect(response.json()).resolves.toEqual({
