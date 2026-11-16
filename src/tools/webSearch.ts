@@ -6,12 +6,15 @@ import { retryWithBackoff, formatToolError, withTimeout } from "../utils/errorHa
 import { sanitizeSearchNotices, sanitizeSearchResponse } from "../utils/exaResponseSanitizer.js";
 import { lenientString, lenientOptionalNumber } from "./validation.js";
 import { logSearchWarnings, withSearchNotices } from "./searchNotes.js";
+import type { SearchType } from "./searchType.js";
+import { addExaBeta, DYNAMIC_HIGHLIGHTS_BETA_TOKEN } from "./highlights.js";
 import { checkpoint } from "agnost";
 
 type WebSearchConfig = {
   exaApiKey?: string;
   userProvidedApiKey?: boolean;
-  defaultSearchType?: "auto" | "lite" | "fast" | "instant";
+  defaultSearchType?: SearchType;
+  dynamicHighlights?: boolean;
   exaSource?: string;
   mcpSessionId?: string;
 };
@@ -76,11 +79,14 @@ export function registerWebSearchTool(
         numResults: numResults || API_CONFIG.DEFAULT_NUM_RESULTS,
         ...(category && { category }),
         contents: {
-          highlights: true,
+          highlights: config?.dynamicHighlights ? { dynamic: true } : true,
         },
       };
 
       const headers = integrationHeaders("web-search-mcp", config);
+      if (config?.dynamicHighlights) {
+        addExaBeta(headers, DYNAMIC_HIGHLIGHTS_BETA_TOKEN);
+      }
 
       checkpoint("web_search_request_prepared");
       logger.log("Sending request to Exa API");
